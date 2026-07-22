@@ -1,0 +1,6 @@
+{
+  "name": "Survey Base Command Generator",
+  "description": "เครื่องมือช่วยงานสำรวจรังวัดเพื่อสร้างคำสั่ง MODE BASE (E, N, MSL + Antenna Height) พร้อมคู่มือการตั้งค่าบน Google Sheets",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
