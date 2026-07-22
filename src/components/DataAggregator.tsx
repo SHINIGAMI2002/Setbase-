@@ -6,6 +6,8 @@
 import React, { useState, useRef } from 'react';
 import { BasePoint } from '../types';
 import { utmToLatLon, latLonToUtm } from '../utils/coordinateConverter';
+import { parseSWMapsFile, ParsedSurveyPoint } from '../utils/swMapsParser';
+import { generateShapefileZip, generateGeoJSON, ExportPoint } from '../utils/shapefileWriter';
 import { 
   Upload, 
   FileSpreadsheet, 
@@ -20,7 +22,10 @@ import {
   Grid,
   Info,
   Copy,
-  AlertCircle
+  AlertCircle,
+  AlertTriangle,
+  MapPin,
+  CheckCircle2
 } from 'lucide-react';
 
 interface DataAggregatorProps {
@@ -39,6 +44,10 @@ interface MasterRow {
   elevation: number;
   remarks: string;
   zone: 47 | 48;
+  warnings?: string[];
+  isDDMMConverted?: boolean;
+  isOutOfBounds?: boolean;
+  isAbnormalElevation?: boolean;
 }
 
 export default function DataAggregator({ points, onAddPoint, onSelectPoint }: DataAggregatorProps) {
@@ -46,6 +55,7 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
   const [masterTable, setMasterTable] = useState<MasterRow[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [duplicateCount, setDuplicateCount] = useState(0);
+  const [exportingShp, setExportingShp] = useState(false);
   
   // Auto-Base candidates extracted
   const [baseCandidates, setBaseCandidates] = useState<MasterRow[]>([]);
@@ -56,105 +66,7 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Helper function to parse CSV robustly on the browser
-  const parseCSVContent = (text: string, fileName: string): { rows: MasterRow[], bases: MasterRow[] } => {
-    const lines = text.split(/\r?\n/);
-    if (lines.length < 2) return { rows: [], bases: [] };
-
-    // Parse separator (accepts comma, semicolon or tabs)
-    const headerLine = lines[0];
-    let separator = ',';
-    if (headerLine.includes(';')) separator = ';';
-    else if (headerLine.includes('\t')) separator = '\t';
-
-    const headers = headerLine.split(separator).map(h => h.trim().replace(/^["']|["']$/g, '').toLowerCase());
-    
-    // Map headers to column indices
-    const nameIdx = headers.findIndex(h => h.includes('name') || h === 'id' || h.includes('point') || h.includes('feature') || h.includes('หมุด') || h === 'no');
-    const latIdx = headers.findIndex(h => h === 'lat' || h.includes('latitude') || h.includes('ละติจูด'));
-    const lonIdx = headers.findIndex(h => h === 'lon' || h === 'lng' || h.includes('longitude') || h.includes('ลองจิจูด'));
-    const xIdx = headers.findIndex(h => h === 'x' || h === 'easting' || h === 'e' || h.includes('easting') || h.includes('พิกัดe'));
-    const yIdx = headers.findIndex(h => h === 'y' || h === 'northing' || h === 'n' || h.includes('northing') || h.includes('พิกัดn'));
-    const elevIdx = headers.findIndex(h => h.includes('elev') || h.includes('msl') || h === 'z' || h.includes('height') || h.includes('elevation') || h.includes('ระดับ'));
-    const remarksIdx = headers.findIndex(h => h.includes('remark') || h.includes('desc') || h.includes('comment') || h.includes('note') || h.includes('หมายเหตุ'));
-    const zoneIdx = headers.findIndex(h => h.includes('zone') || h.includes('โซน'));
-
-    const rows: MasterRow[] = [];
-    const bases: MasterRow[] = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      // Handle cells in line taking quotes into account
-      const cells: string[] = [];
-      let inQuotes = false;
-      let current = '';
-      for (let c = 0; c < line.length; c++) {
-        const char = line[c];
-        if (char === '"' || char === "'") {
-          inQuotes = !inQuotes;
-        } else if (char === separator && !inQuotes) {
-          cells.push(current.trim().replace(/^["']|["']$/g, ''));
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      cells.push(current.trim().replace(/^["']|["']$/g, ''));
-
-      // Skip lines without minimum required values
-      if (cells.length < 2) continue;
-
-      const featureName = nameIdx >= 0 && cells[nameIdx] ? cells[nameIdx] : `PT-${fileName.slice(0, 5)}-${i}`;
-      let x = xIdx >= 0 && cells[xIdx] ? parseFloat(cells[xIdx]) : 0;
-      let y = yIdx >= 0 && cells[yIdx] ? parseFloat(cells[yIdx]) : 0;
-      let elevation = elevIdx >= 0 && cells[elevIdx] ? parseFloat(cells[elevIdx]) : 0;
-      let lat = latIdx >= 0 && cells[latIdx] ? parseFloat(cells[latIdx]) : 0;
-      let lon = lonIdx >= 0 && cells[lonIdx] ? parseFloat(cells[lonIdx]) : 0;
-      const remarks = remarksIdx >= 0 && cells[remarksIdx] ? cells[remarksIdx] : '';
-      let zone = zoneIdx >= 0 && cells[zoneIdx] ? parseInt(cells[zoneIdx]) : 47;
-      if (zone !== 47 && zone !== 48) {
-        // Fallback guess based on Longitude dividing line in Thailand (102 degrees E)
-        zone = (lon >= 102.0) ? 48 : 47;
-      }
-
-      // Check coordinates fill-ins (UTM to LatLon or vice-versa)
-      if ((x > 0 && y > 0) && (lat === 0 || lon === 0)) {
-        const converted = utmToLatLon(x, y, zone as 47 | 48);
-        lat = converted.lat;
-        lon = converted.lon;
-      } else if ((lat !== 0 && lon !== 0) && (x === 0 || y === 0)) {
-        const converted = latLonToUtm(lat, lon, zone as 47 | 48);
-        x = converted.easting;
-        y = converted.northing;
-        zone = converted.zone;
-      }
-
-      const rowItem: MasterRow = {
-        id: `row-${fileName}-${i}-${Date.now()}`,
-        featureName,
-        lat: isNaN(lat) ? 0 : lat,
-        lon: isNaN(lon) ? 0 : lon,
-        x: isNaN(x) ? 0 : x,
-        y: isNaN(y) ? 0 : y,
-        elevation: isNaN(elevation) ? 0 : elevation,
-        remarks,
-        zone: (zone === 47 || zone === 48) ? zone : 47
-      };
-
-      rows.push(rowItem);
-
-      // Auto-Base detection check: Remarks contain 'BASE' (case-insensitive)
-      if (remarks.toUpperCase().includes('BASE')) {
-        bases.push(rowItem);
-      }
-    }
-
-    return { rows, bases };
-  };
-
-  // Upload handler for multiple files
+  // Upload handler for multiple files (.csv, .xlsx, .xls)
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
@@ -162,7 +74,7 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
     const newFilesList = files.map(file => ({
       name: file.name,
       size: file.size,
-      status: 'กำลังดาวน์โหลด...'
+      status: 'กำลังประมวลผล...'
     }));
     setUploadedFiles(prev => [...prev, ...newFilesList]);
 
@@ -171,23 +83,40 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
 
     for (const file of files) {
       try {
-        const text = await file.text();
-        const { rows, bases } = parseCSVContent(text, file.name);
+        const parsedPoints: ParsedSurveyPoint[] = await parseSWMapsFile(file);
         
-        newRowsAccumulator = [...newRowsAccumulator, ...rows];
-        newBasesAccumulator = [...newBasesAccumulator, ...bases];
+        const fileRows: MasterRow[] = parsedPoints.map((p) => ({
+          id: p.id,
+          featureName: p.name,
+          lat: p.lat,
+          lon: p.lon,
+          x: p.easting,
+          y: p.northing,
+          elevation: p.msl,
+          remarks: p.remarks,
+          zone: p.zone,
+          warnings: p.warnings,
+          isDDMMConverted: p.isDDMMConverted,
+          isOutOfBounds: p.isOutOfBounds,
+          isAbnormalElevation: p.isAbnormalElevation,
+        }));
 
-        setUploadedFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'อิมพอร์ตสำเร็จ' } : f));
+        const fileBases = fileRows.filter(r => r.remarks.toUpperCase().includes('BASE'));
+
+        newRowsAccumulator = [...newRowsAccumulator, ...fileRows];
+        newBasesAccumulator = [...newBasesAccumulator, ...fileBases];
+
+        setUploadedFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: `สำเร็จ (${fileRows.length} จุด)` } : f));
       } catch (err) {
         console.error('Error parsing file: ' + file.name, err);
-        setUploadedFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'เกิดข้อผิดพลาดในการโหลด' } : f));
+        setUploadedFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'เกิดข้อผิดพลาด' } : f));
       }
     }
 
     // Merge with existing master table and drop duplicates
     const combined = [...masterTable, ...newRowsAccumulator];
     
-    // Deduplication key: exact X and Y coordinates (or exact Lat/Lon) to 3 decimals
+    // Deduplication key: exact X and Y coordinates (or exact Lat/Lon)
     const seen = new Set<string>();
     const uniqueRows: MasterRow[] = [];
     let filteredOut = 0;
@@ -244,7 +173,7 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
       northing: cand.y,
       msl: cand.elevation,
       zone: cand.zone,
-      description: `สถานีฐานที่ดึงพิกัดอัตโนมัติจากไฟล์ CSV (${cand.remarks})`,
+      description: `สถานีฐานที่ดึงพิกัดอัตโนมัติจากไฟล์ SW Maps/CSV (${cand.remarks})`,
       isDefault: false
     };
 
@@ -267,9 +196,9 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
   const downloadCSV = () => {
     if (masterTable.length === 0) return;
     
-    const headers = 'Feature Name,Lat,Lon,X,Y,Elevation,Remarks,Zone\n';
+    const headers = 'Feature Name,Lat,Lon,X,Y,Elevation,Remarks,Zone,Warnings\n';
     const rows = masterTable.map(r => 
-      `"${r.featureName.replace(/"/g, '""')}",${r.lat.toFixed(6)},${r.lon.toFixed(6)},${r.x.toFixed(3)},${r.y.toFixed(3)},${r.elevation.toFixed(3)},"${r.remarks.replace(/"/g, '""')}",${r.zone}`
+      `"${r.featureName.replace(/"/g, '""')}",${r.lat.toFixed(6)},${r.lon.toFixed(6)},${r.x.toFixed(3)},${r.y.toFixed(3)},${r.elevation.toFixed(3)},"${r.remarks.replace(/"/g, '""')}",${r.zone},"${(r.warnings || []).join('; ')}"`
     ).join('\n');
 
     const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
@@ -281,6 +210,70 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
     link.click();
     document.body.removeChild(link);
   };
+
+  // 100% Client-Side Shapefile (.zip) Downloader
+  const handleDownloadShapefile = async () => {
+    if (masterTable.length === 0) return;
+    setExportingShp(true);
+    try {
+      const exportPoints: ExportPoint[] = masterTable.map((r) => ({
+        id: r.id,
+        name: r.featureName,
+        zone: r.zone,
+        easting: r.x,
+        northing: r.y,
+        msl: r.elevation,
+        remarks: r.remarks,
+        lat: r.lat,
+        lon: r.lon,
+      }));
+
+      const isUtm = exportProjection !== 'wgs84';
+      const zipBlob = await generateShapefileZip(exportPoints, isUtm);
+
+      const url = URL.createObjectURL(zipBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Master_Survey_Shapefile_${exportProjection.toUpperCase()}_${Date.now()}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`ไม่สามารถสร้าง Shapefile ได้: ${err.message}`);
+    } finally {
+      setExportingShp(false);
+    }
+  };
+
+  // 100% Client-Side GeoJSON Downloader
+  const downloadGeoJSON = () => {
+    if (masterTable.length === 0) return;
+
+    const exportPoints: ExportPoint[] = masterTable.map((r) => ({
+      id: r.id,
+      name: r.featureName,
+      zone: r.zone,
+      easting: r.x,
+      northing: r.y,
+      msl: r.elevation,
+      remarks: r.remarks,
+      lat: r.lat,
+      lon: r.lon,
+    }));
+
+    const jsonStr = generateGeoJSON(exportPoints, exportProjection !== 'wgs84');
+
+    const blob = new Blob([jsonStr], { type: 'application/geo+json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `Master_Survey_Points_${exportProjection}_${Date.now()}.geojson`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
 
   // KML Downloader
   const downloadKML = () => {
@@ -325,46 +318,6 @@ export default function DataAggregator({ points, onAddPoint, onSelectPoint }: Da
     const link = document.createElement('a');
     link.setAttribute('href', url);
     link.setAttribute('download', `Master_Survey_Points_${Date.now()}.kml`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // GeoJSON Downloader
-  const downloadGeoJSON = () => {
-    if (masterTable.length === 0) return;
-
-    const geojson = {
-      type: 'FeatureCollection',
-      name: 'Master Survey Points',
-      crs: {
-        type: 'name',
-        properties: {
-          name: 'urn:ogc:def:crs:OGC:1.3:CRS84'
-        }
-      },
-      features: masterTable.map(r => ({
-        type: 'Feature',
-        properties: {
-          featureName: r.featureName,
-          x: r.x,
-          y: r.y,
-          elevation: r.elevation,
-          remarks: r.remarks,
-          zone: r.zone
-        },
-        geometry: {
-          type: 'Point',
-          coordinates: [r.lon, r.lat, r.elevation]
-        }
-      }))
-    };
-
-    const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/geo+json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `Master_Survey_Points_${Date.now()}.geojson`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -619,14 +572,14 @@ else:
               multiple 
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept=".csv"
+              accept=".csv, .xlsx, .xls"
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
             <Upload className="w-10 h-10 text-slate-400 mb-3" />
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-1">ลากไฟล์ CSV สำรวจมาวางที่นี่</h3>
-            <p className="text-[11px] text-slate-500 mb-2">หรือคลิกเพื่อค้นหาโมดูลไฟล์ในระบบความจุ (สามารถอัปได้ทีละหลายไฟล์พร้อมกัน)</p>
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-1">ลากไฟล์ CSV / Excel (.xlsx, .xls) SW Maps มาวางที่นี่</h3>
+            <p className="text-[11px] text-slate-500 mb-2">รองรับไฟล์จาก SW Maps, RTK Collector หรือ CSV มาตรฐาน (ประมวลผลบนเบราว์เซอร์ 100%)</p>
             <span className="text-[10px] text-amber-500/80 font-semibold bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded">
-              AUTO HEADERS SCANNING
+              SW MAPS & COMNAV DDMM RECTIFIER ACTIVE
             </span>
           </div>
 
@@ -652,7 +605,7 @@ else:
                       <span className="truncate text-slate-300 font-medium" title={f.name}>{f.name}</span>
                     </div>
                     <span className={`shrink-0 font-bold text-[9px] px-1.5 py-0.5 rounded ${
-                      f.status === 'อิมพอร์ตสำเร็จ' ? 'bg-green-500/10 text-green-400' : 'bg-amber-500/10 text-amber-400 animate-pulse'
+                      f.status.includes('สำเร็จ') ? 'bg-green-500/10 text-green-400' : 'bg-amber-500/10 text-amber-400 animate-pulse'
                     }`}>
                       {f.status}
                     </span>
@@ -770,13 +723,13 @@ else:
                 <FileSpreadsheet className="w-12 h-12 text-slate-600 mb-2.5 animate-pulse" />
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-400">ยังไม่มีข้อมูลในตารางรวบรวม</p>
                 <p className="text-[11px] text-slate-600 mt-1 max-w-sm leading-normal">
-                  อัปโหลดไฟล์รายงานหรือผลการสำรวจจากเสาพิกัด (.CSV) ตรงแถบซ้ายมือ ข้อมูลพิกัดของแต่ละไฟล์จะนำมาระดมและคัดพิกัดซ้ำกันออกโดยอัตโนมัติ
+                  อัปโหลดไฟล์รายงานหรือผลการสำรวจจาก SW Maps, Excel (.xlsx/.xls) หรือ CSV ตรงแถบซ้ายมือ ข้อมูลพิกัดของแต่ละไฟล์จะนำมาระดม คัดข้อมูลผิดปกติ และกรองข้อมูลซ้ำกันออกโดยอัตโนมัติ
                 </p>
               </div>
             ) : (
               <div className="space-y-4">
                 {/* Desktop View Table */}
-                <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 max-h-[350px] overflow-y-auto scrollbar-thin">
+                <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/20 max-h-[380px] overflow-y-auto scrollbar-thin">
                   <table className="w-full text-left border-collapse text-[11px]">
                     <thead className="bg-[#121216] border-b border-white/10 text-slate-400 font-bold uppercase tracking-wider sticky top-0 z-10">
                       <tr>
@@ -788,15 +741,18 @@ else:
                         <th className="p-2.5 text-slate-400">Lat (Decimal)</th>
                         <th className="p-2.5 text-slate-400">Lon (Decimal)</th>
                         <th className="p-2.5">Zone</th>
+                        <th className="p-2.5">สถานะ/เตือน</th>
                         <th className="p-2.5">หมายเหตุ / Remarks</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5 text-slate-300 font-mono">
                       {filteredTable.map((r, index) => {
                         const isBase = r.remarks.toUpperCase().includes('BASE');
+                        const hasWarnings = (r.warnings && r.warnings.length > 0) || r.isDDMMConverted || r.isOutOfBounds || r.isAbnormalElevation;
+
                         return (
                           <tr key={r.id} className={`hover:bg-white/3 transition-colors ${
-                            isBase ? 'bg-amber-500/5 text-amber-300 font-bold' : ''
+                            isBase ? 'bg-amber-500/5 text-amber-300 font-bold' : hasWarnings ? 'bg-amber-500/5' : ''
                           }`}>
                             <td className="p-2.5 text-center text-slate-500 font-sans">{index + 1}</td>
                             <td className="p-2.5 text-white font-sans font-bold flex items-center gap-1.5">
@@ -807,10 +763,38 @@ else:
                             </td>
                             <td className="p-2.5">{r.x.toFixed(3)}</td>
                             <td className="p-2.5">{r.y.toFixed(3)}</td>
-                            <td className="p-2.5 text-amber-400">{r.elevation.toFixed(3)}</td>
-                            <td className="p-2.5 text-slate-400 text-[10px]">{r.lat.toFixed(6)}</td>
-                            <td className="p-2.5 text-slate-400 text-[10px]">{r.lon.toFixed(6)}</td>
+                            <td className={`p-2.5 ${r.isAbnormalElevation ? 'text-rose-400 font-bold' : 'text-amber-400'}`}>
+                              {r.elevation.toFixed(3)}
+                            </td>
+                            <td className={`p-2.5 text-[10px] ${r.isOutOfBounds ? 'text-rose-400 font-bold' : 'text-slate-400'}`}>
+                              {r.lat.toFixed(6)}
+                            </td>
+                            <td className={`p-2.5 text-[10px] ${r.isOutOfBounds ? 'text-rose-400 font-bold' : 'text-slate-400'}`}>
+                              {r.lon.toFixed(6)}
+                            </td>
                             <td className="p-2.5 font-sans">Zone {r.zone}N</td>
+                            <td className="p-2.5 font-sans">
+                              {r.isDDMMConverted && (
+                                <span className="inline-block text-[9px] bg-sky-500/10 border border-sky-500/30 text-sky-400 px-1.5 py-0.5 rounded font-bold mr-1" title="แปลง DDMM.MMMMM เป็น Decimal">
+                                  DDMM Fixed
+                                </span>
+                              )}
+                              {r.isOutOfBounds && (
+                                <span className="inline-block text-[9px] bg-rose-500/10 border border-rose-500/30 text-rose-400 px-1.5 py-0.5 rounded font-bold mr-1" title="พิกัดอยู่นอกเขตปกติ">
+                                  Out Bounds
+                                </span>
+                              )}
+                              {r.isAbnormalElevation && (
+                                <span className="inline-block text-[9px] bg-amber-500/10 border border-amber-500/30 text-amber-400 px-1.5 py-0.5 rounded font-bold" title="ความสูง MSL ผิดสังเกต">
+                                  Elev Flag
+                                </span>
+                              )}
+                              {!hasWarnings && (
+                                <span className="text-[9px] text-emerald-400 font-bold flex items-center gap-0.5">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" /> ปกติ
+                                </span>
+                              )}
+                            </td>
                             <td className="p-2.5 text-slate-400 italic font-sans max-w-[150px] truncate" title={r.remarks}>{r.remarks || '-'}</td>
                           </tr>
                         );
@@ -822,36 +806,60 @@ else:
                 {/* Exporter UI Buttons Grid */}
                 <div className="bg-black/35 border border-white/5 rounded-2xl p-4 space-y-3.5">
                   <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-white/5 pb-2.5">
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1">
-                      <Download className="w-4 h-4 text-amber-500" />
-                      GIS Export Interface (เครื่องมือเครื่องย่นส่งออฟฟิศ)
-                    </h4>
-                    <p className="text-[10px] text-slate-400">เลือกระบบพิกัดพล็อตระบุแปลง: UTM หรือ Geodetic ในไฟล์สเกลาร์</p>
+                    <div>
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1">
+                        <Download className="w-4 h-4 text-amber-500" />
+                        GIS Direct Export Engine (100% Client-Side Generator)
+                      </h4>
+                      <p className="text-[10px] text-slate-400">ส่งออกเป็น Shapefile (.shp), GeoJSON หรือ KML ได้ทันทีโดยไม่ต้องผ่านเซิร์ฟเวอร์</p>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-[10px] text-slate-400">ระบบพิกัด:</span>
+                      <select
+                        value={exportProjection}
+                        onChange={(e) => setExportProjection(e.target.value as any)}
+                        className="h-8 px-2 bg-[#1C1D24] border border-white/10 rounded-lg text-xs text-amber-400 font-bold focus:outline-none"
+                      >
+                        <option value="wgs84">WGS84 Geodetic (Lat, Lon)</option>
+                        <option value="utm47">UTM Zone 47N (Easting, Northing)</option>
+                        <option value="utm48">UTM Zone 48N (Easting, Northing)</option>
+                      </select>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <button
+                      onClick={handleDownloadShapefile}
+                      disabled={exportingShp}
+                      className="py-3 px-3 bg-amber-500 hover:bg-amber-600 text-black rounded-xl font-black transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-97 shadow-lg"
+                    >
+                      <Layers className="w-4 h-4 text-black stroke-[2.5]" />
+                      <span>{exportingShp ? 'กำลังสร้าง...' : 'ดาวน์โหลด Shapefile (.ZIP)'}</span>
+                    </button>
+
                     <button
                       onClick={downloadGeoJSON}
-                      className="py-3 px-4 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-97"
+                      className="py-3 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-97"
                     >
-                      <Layers className="w-4.5 h-4.5 text-amber-500 shrink-0" />
-                      <span>ส่งออกพิกัด GeoJSON</span>
+                      <Layers className="w-4 h-4 text-amber-500 shrink-0" />
+                      <span>ส่งออก GeoJSON</span>
                     </button>
                     
                     <button
                       onClick={downloadKML}
-                      className="py-3 px-4 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-97"
+                      className="py-3 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-97"
                     >
-                      <Layers className="w-4.5 h-4.5 text-sky-400 shrink-0" />
-                      <span>ส่งออกไฟล์ Google Earth KML</span>
+                      <Layers className="w-4 h-4 text-sky-400 shrink-0" />
+                      <span>ส่งออก Google Earth KML</span>
                     </button>
 
                     <button
                       onClick={downloadCSV}
-                      className="py-3 px-4 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-2 active:scale-97"
+                      className="py-3 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-amber-500/50 rounded-xl font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-97"
                     >
-                      <FileSpreadsheet className="w-4.5 h-4.5 text-green-400 shrink-0" />
-                      <span>บันทึกตารางรวมพิกัด CSV</span>
+                      <FileSpreadsheet className="w-4 h-4 text-green-400 shrink-0" />
+                      <span>บันทึกตาราง CSV</span>
                     </button>
                   </div>
                 </div>
@@ -860,6 +868,7 @@ else:
           </div>
         </div>
       </div>
+
 
       {/* Python/Streamlit Code Integration Assistant Panel */}
       <div className="bg-[#16171D] border border-white/10 rounded-2xl p-6 space-y-4">

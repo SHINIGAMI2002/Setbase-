@@ -390,6 +390,7 @@ export default function App() {
               setAntennaHeight={setAntennaHeight}
               antennaHeightStr={antennaHeightStr}
               setAntennaHeightStr={setAntennaHeightStr}
+              onAddPoints={(pts) => pts.forEach(handleAddImportedPoint)}
             />
 
             {/* List Manager to Create, Edit, or Delete custom pins */}

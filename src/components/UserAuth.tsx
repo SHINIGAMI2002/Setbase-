@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { AuthService, UserSession } from '../utils/db';
-import { ShieldAlert, User, Lock, Mail, HelpCircle, KeyRound, CheckCircle, LogOut, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import { AuthService, UserSession, DatabaseBackupService } from '../utils/db';
+import { ShieldAlert, User, Lock, Mail, HelpCircle, KeyRound, CheckCircle, LogOut, ArrowRight, Eye, EyeOff, HardDrive, Download, Upload, Database } from 'lucide-react';
 
 interface UserAuthProps {
   onSessionChange: (session: UserSession | null) => void;
@@ -25,6 +25,38 @@ export default function UserAuth({ onSessionChange, currentSession }: UserAuthPr
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [backupMsg, setBackupMsg] = useState<string | null>(null);
+
+  const handleExportBackup = async () => {
+    try {
+      const jsonStr = await DatabaseBackupService.exportDatabaseJSON();
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `GeoSurvey_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupMsg('ส่งออกไฟล์สำรองฐานข้อมูล (.json) สำเร็จแล้ว!');
+      setTimeout(() => setBackupMsg(null), 4000);
+    } catch (err: any) {
+      setError(`ส่งออกข้อมูลไม่สำเร็จ: ${err.message}`);
+    }
+  };
+
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    try {
+      const text = await file.text();
+      const res = await DatabaseBackupService.importDatabaseJSON(text, 'merge');
+      setBackupMsg(`นำเข้าข้อมูลสำเร็จ: เพิ่มจุดสำรวจ ${res.importedPoints} จุด และผู้ใช้งาน ${res.importedUsers} บัญชี`);
+      setTimeout(() => setBackupMsg(null), 5000);
+    } catch (err: any) {
+      setError(`นำเข้าข้อมูลไม่สำเร็จ: ${err.message}`);
+    }
+  };
+
 
   const clearMessages = () => {
     setError(null);
@@ -440,6 +472,50 @@ export default function UserAuth({ onSessionChange, currentSession }: UserAuthPr
           </div>
         </form>
       )}
+
+      {/* Local-First Database Backup & Device Migration Panel */}
+      <div className="mt-8 border-t border-white/10 pt-6">
+        <div className="bg-[#121216] border border-amber-500/20 rounded-xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <HardDrive className="w-5 h-5 text-amber-500 shrink-0" />
+            <div>
+              <h3 className="text-xs font-extrabold text-white">สำรองและย้ายฐานข้อมูลประจำเครื่อง (Offline Database Backup & Migration)</h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                ข้อมูลทั้งหมดถูกจัดเก็บใน <strong>IndexedDB บนอุปกรณ์นี้แบบ Local-First 100%</strong> ไม่ถูกส่งออกอินเทอร์เน็ต สามารถส่งออกไฟล์ .json เพื่อ backup หรือย้ายไปทำงานเครื่องอื่น
+              </p>
+            </div>
+          </div>
+
+          {backupMsg && (
+            <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-2.5 rounded-lg text-xs font-bold">
+              {backupMsg}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+            <button
+              onClick={handleExportBackup}
+              type="button"
+              className="flex-1 h-10 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              <span>ส่งออกไฟล์สำรองฐานข้อมูล (.json)</span>
+            </button>
+
+            <label className="flex-1 h-10 bg-black/40 hover:bg-white/5 border border-white/15 text-slate-300 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2">
+              <Upload className="w-4 h-4 text-slate-400" />
+              <span>นำเข้าไฟล์สำรอง (.json)</span>
+              <input
+                type="file"
+                accept=".json"
+                onChange={handleImportBackup}
+                className="hidden"
+              />
+            </label>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+

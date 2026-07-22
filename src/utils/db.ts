@@ -426,10 +426,115 @@ export class PointService {
 
         syncedCount++;
       } catch (err) {
-        errors.push(`เกิดข้อผิดพลาดในการซิงค์ข้อมูลจุด ${actionRecord.entityId}: ${err}`);
+        errors.push(`เกิดข้อผิดพลาดในการประมวลผลคิวสำรองข้อมูลจุด ${actionRecord.entityId}: ${err}`);
       }
     }
 
     return { syncedCount, errors };
   }
 }
+
+/**
+ * Local-First Database Backup & Migration Service
+ * Allows users to export and import their entire IndexedDB database (.json)
+ * without needing cloud servers.
+ */
+export class DatabaseBackupService {
+  static async exportDatabaseJSON(): Promise<string> {
+    const db = await initDB();
+
+    // Fetch all users
+    const users: LocalUser[] = await new Promise((resolve) => {
+      const tx = db.transaction('users', 'readonly');
+      const store = tx.objectStore('users');
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    // Fetch all points
+    const points: any[] = await new Promise((resolve) => {
+      const tx = db.transaction('points', 'readonly');
+      const store = tx.objectStore('points');
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    const backupPayload = {
+      app: 'GeoSurvey Pro / Survey Base Command Generator',
+      version: '1.0.0',
+      type: 'local_indexeddb_backup',
+      exportedAt: new Date().toISOString(),
+      timestamp: Date.now(),
+      users,
+      points,
+    };
+
+    return JSON.stringify(backupPayload, null, 2);
+  }
+
+  static async importDatabaseJSON(
+    jsonString: string,
+    mode: 'merge' | 'overwrite' = 'merge'
+  ): Promise<{ importedPoints: number; importedUsers: number }> {
+    let data: any;
+    try {
+      data = JSON.parse(jsonString);
+    } catch {
+      throw new Error('ไฟล์สำรองข้อมูล JSON ไม่ถูกต้อง');
+    }
+
+    if (!data.points || !Array.isArray(data.points)) {
+      throw new Error('โครงสร้างไฟล์ backup ไม่สมบูรณ์ (ไม่พบตารางพิกัด points)');
+    }
+
+    const db = await initDB();
+    let importedUsers = 0;
+    let importedPoints = 0;
+
+    // Optional clear if overwrite mode
+    if (mode === 'overwrite') {
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(['users', 'points', 'sync_queue'], 'readwrite');
+        tx.objectStore('users').clear();
+        tx.objectStore('points').clear();
+        tx.objectStore('sync_queue').clear();
+        tx.oncomplete = () => resolve();
+      });
+    }
+
+    // Import Users
+    if (data.users && Array.isArray(data.users)) {
+      for (const user of data.users) {
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction('users', 'readwrite');
+          const store = tx.objectStore('users');
+          const req = store.put(user);
+          req.onsuccess = () => {
+            importedUsers++;
+            resolve();
+          };
+          req.onerror = () => resolve();
+        });
+      }
+    }
+
+    // Import Points
+    for (const point of data.points) {
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction('points', 'readwrite');
+        const store = tx.objectStore('points');
+        const req = store.put(point);
+        req.onsuccess = () => {
+          importedPoints++;
+          resolve();
+        };
+        req.onerror = () => resolve();
+      });
+    }
+
+    return { importedUsers, importedPoints };
+  }
+}
+

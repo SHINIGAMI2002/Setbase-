@@ -1,0 +1,22 @@
+{
+  "short_name": "GeoSurvey Pro",
+  "name": "GeoSurvey Pro / Survey Base Command Generator",
+  "icons": [
+    {
+      "src": "/pwa-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/pwa-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#121216",
+  "theme_color": "#121216",
+  "display": "standalone",
+  "orientation": "any",
+  "description": "เครื่องมือสำรวจรังวัด คำนวณ MODE BASE และรวบรวมพิกัด GIS ทำงานออฟไลน์ 100%"
+}

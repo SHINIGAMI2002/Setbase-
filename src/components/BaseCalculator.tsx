@@ -5,8 +5,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { BasePoint, CommandFormat } from '../types';
-import { Copy, Check, ChevronDown, RefreshCw, Layers, AlertCircle, Sparkles, Scale, BookOpen, Info, ArrowUp, ArrowDown } from 'lucide-react';
+import { Copy, Check, ChevronDown, RefreshCw, Layers, AlertCircle, Sparkles, Scale, BookOpen, Info, ArrowUp, ArrowDown, Bot } from 'lucide-react';
 import { utmToLatLon, latLonToECEF, getGeoidUndulation } from '../utils/coordinateConverter';
+import AiCoordinateParserModal from './AiCoordinateParserModal';
 
 interface BaseCalculatorProps {
   points: BasePoint[];
@@ -16,6 +17,7 @@ interface BaseCalculatorProps {
   setAntennaHeight: (h: number) => void;
   antennaHeightStr: string;
   setAntennaHeightStr: (s: string) => void;
+  onAddPoints?: (pts: BasePoint[]) => void;
 }
 
 export default function BaseCalculator({
@@ -26,11 +28,13 @@ export default function BaseCalculator({
   setAntennaHeight,
   antennaHeightStr,
   setAntennaHeightStr,
+  onAddPoints,
 }: BaseCalculatorProps) {
   const [commandFormat, setCommandFormat] = useState<CommandFormat>('spaced');
   const [coordSystem, setCoordSystem] = useState<'utm' | 'ecef' | 'geodetic'>('utm');
   const [copied, setCopied] = useState<boolean>(false);
   const [shaking, setShaking] = useState<boolean>(false);
+  const [showAiModal, setShowAiModal] = useState<boolean>(false);
 
   // Geoid Model Selection State
   const [geoidModel, setGeoidModel] = useState<'NONE' | 'TMG2017' | 'EGM2008' | 'EGM96'>('NONE');
@@ -208,10 +212,23 @@ export default function BaseCalculator({
       {/* Left Input Section */}
       <div className="lg:col-span-7 space-y-6">
         <div className="bg-[#16171D] rounded-2xl border border-white/10 shadow-lg p-5 sm:p-6">
-          <h2 className="text-base font-bold text-white mb-5 flex items-center gap-2">
-            <span className="inline-flex w-2.5 h-2.5 rounded-full bg-amber-500 hover:scale-110 transition-transform"></span>
-            ป้อนข้อมูลสถานีฐาน (Base Input Panel)
-          </h2>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+            <h2 className="text-base font-bold text-white flex items-center gap-2">
+              <span className="inline-flex w-2.5 h-2.5 rounded-full bg-amber-500 hover:scale-110 transition-transform"></span>
+              ป้อนข้อมูลสถานีฐาน (Base Input Panel)
+            </h2>
+
+            {onAddPoints && (
+              <button
+                type="button"
+                onClick={() => setShowAiModal(true)}
+                className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 active:scale-95 shrink-0"
+              >
+                <Bot className="w-3.5 h-3.5 text-amber-400" />
+                <span>🤖 AI สกัดพิกัด (AI Extractor)</span>
+              </button>
+            )}
+          </div>
 
           <div className="space-y-5">
             {/* Base Point Directory Selection Dropdown */}
@@ -883,6 +900,18 @@ export default function BaseCalculator({
           </div>
         </div>
       </div>
+
+      {/* AI Coordinate Parser Modal */}
+      {onAddPoints && (
+        <AiCoordinateParserModal
+          isOpen={showAiModal}
+          onClose={() => setShowAiModal(false)}
+          onAddPoints={(newPts) => {
+            onAddPoints(newPts);
+            setShowAiModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }
